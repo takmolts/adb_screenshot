@@ -22,8 +22,9 @@ import numpy as np
 from PIL import Image
 
 from . import adb, cli
-from .capture import CaptureError, Region, SequenceConfig, SequenceRunner, save_frame
+from .capture import CaptureError, Region, SequenceConfig, SequenceRunner, book_dir, save_frame
 from .control import ACTION_DOWN, ACTION_MOVE, ACTION_UP
+from .presets import Preset, PresetStore
 from .session import Session
 
 log = logging.getLogger(__name__)
@@ -75,17 +76,33 @@ class App:
         self.width_var = tk.StringVar(value=str(args.width) if args.width else "")
         self.height_var = tk.StringVar(value=str(args.height) if args.height else "")
 
+        # プリセット（引数 > プリセット > 既定値 の順で初期値を決める）
+        self.presets = PresetStore(args.presets)
+        try:
+            params = cli.resolve_capture_params(args, self.presets)
+            preset_error: str | None = None
+        except CaptureError as e:
+            preset_error = str(e)
+            args_no_preset = argparse.Namespace(**{**vars(args), "preset": None})
+            params = cli.resolve_capture_params(args_no_preset, self.presets)
+        self.preset_var = tk.StringVar(value=args.preset or "")
+        self.book_var = tk.StringVar(value=params.book)
+        self.volume_var = tk.StringVar(value=args.volume)
+        self.save_path_var = tk.StringVar(value="")
+
         # 操作パネル
         self.mode = tk.StringVar(value=MODE_CONTROL)
-        self.region_var = tk.StringVar(value=str(args.region) if args.region else "")
-        self.tap_var = tk.StringVar(value=f"{args.tap[0]},{args.tap[1]}" if args.tap else "")
+        self.region_var = tk.StringVar(value=str(params.region) if params.region else "")
+        self.tap_var = tk.StringVar(value=f"{params.tap[0]},{params.tap[1]}" if params.tap else "")
         self.count_var = tk.StringVar(value=str(args.count))
-        self.interval_var = tk.StringVar(value=f"{args.interval:g}")
-        self.settle_var = tk.StringVar(value=f"{args.settle:g}")
+        self.interval_var = tk.StringVar(value=f"{params.interval:g}")
+        self.settle_var = tk.StringVar(value=f"{params.settle:g}")
         self.timeout_var = tk.StringVar(value=f"{args.timeout:g}")
         self.out_var = tk.StringVar(value=args.out)
         self.prefix_var = tk.StringVar(value=args.prefix)
         self.format_var = tk.StringVar(value=args.format)
+        for var in (self.out_var, self.book_var, self.volume_var, self.prefix_var, self.format_var):
+            var.trace_add("write", lambda *_: self._update_save_path())
         self.status_var = tk.StringVar(value="未接続")
         self.progress_var = tk.StringVar(value="")
         self.zoom_var = tk.StringVar(value="全体")
@@ -96,9 +113,12 @@ class App:
         root.minsize(700, 500)
         self._build_widgets()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self._update_save_path()
         root.after(100, self._poll_events)
         root.after(RENDER_INTERVAL_MS, self._render_loop)
         root.after(50, self._refresh_devices)
+        if preset_error:
+            root.after(200, lambda: messagebox.showwarning("プリセット", preset_error))
 
     # ================================================================ widgets
     def _build_widgets(self) -> None:
@@ -186,6 +206,20 @@ class App:
             ttk.Entry(panel, textvariable=var, width=width).grid(row=row, column=1, columnspan=2, sticky="we")
             row += 1
 
+        add_label("書籍プリセット")
+        self.preset_combo = ttk.Combobox(panel, textvariable=self.preset_var, values=self.presets.names(), width=16)
+        self.preset_combo.grid(row=row, column=0, columnspan=3, sticky="we")
+        self.preset_combo.bind("<<ComboboxSelected>>", lambda _e: self.load_preset())
+        row += 1
+        btns = ttk.Frame(panel)
+        btns.grid(row=row, column=0, columnspan=3, sticky="we")
+        ttk.Button(btns, text="読込", width=6, command=self.load_preset).pack(side="left")
+        ttk.Button(btns, text="登録/更新", width=9, command=self.save_preset).pack(side="left", padx=2)
+        ttk.Button(btns, text="削除", width=6, command=self.delete_preset).pack(side="left")
+        row += 1
+        add_entry("書籍名", self.book_var)
+        add_entry("巻数・号", self.volume_var)
+
         add_label("マウス操作モード")
         for text, value in (
             ("端末を操作", MODE_CONTROL),
@@ -218,9 +252,13 @@ class App:
         add_entry("静止判定 [s]", self.settle_var)
         add_entry("タイムアウト [s]", self.timeout_var)
 
-        add_label("保存先")
+        add_label("保存先ベース")
         ttk.Entry(panel, textvariable=self.out_var, width=18).grid(row=row, column=0, columnspan=2, sticky="we")
         ttk.Button(panel, text="参照", command=self._choose_dir).grid(row=row, column=2)
+        row += 1
+        ttk.Label(panel, textvariable=self.save_path_var, wraplength=240, foreground="#555").grid(
+            row=row, column=0, columnspan=3, sticky="w"
+        )
         row += 1
         add_entry("プレフィックス", self.prefix_var)
         ttk.Label(panel, text="形式").grid(row=row, column=0, sticky="w")
@@ -746,14 +784,74 @@ class App:
         if self.session and self.session.controller:
             self._safe_control(getattr(self.session.controller, name))
 
-    # ============================================================== actions
     def _choose_dir(self) -> None:
         chosen = filedialog.askdirectory(initialdir=self.out_var.get() or ".")
         if chosen:
             self.out_var.set(chosen)
 
+    # ============================================================== presets
+    def _output_dir(self) -> Path:
+        return book_dir(Path(self.out_var.get() or "output"), self.book_var.get(), self.volume_var.get())
+
+    def _update_save_path(self) -> None:
+        self.save_path_var.set(f"→ {self._output_dir()}/{self.prefix_var.get()}00001.{self.format_var.get()}")
+
+    def load_preset(self) -> None:
+        name = self.preset_var.get().strip()
+        preset = self.presets.get(name)
+        if preset is None:
+            messagebox.showerror("プリセット", f"プリセットがありません: {name!r}")
+            return
+        self.book_var.set(preset.name)
+        self.region_var.set(preset.region)
+        self.tap_var.set(preset.tap)
+        if preset.interval is not None:
+            self.interval_var.set(f"{preset.interval:g}")
+        if preset.settle is not None:
+            self.settle_var.set(f"{preset.settle:g}")
+        self._draw_overlays()
+        self.progress_var.set(f"プリセット読込: {preset.name}")
+
+    def save_preset(self) -> None:
+        name = self.book_var.get().strip() or self.preset_var.get().strip()
+        if not name:
+            messagebox.showerror("プリセット", "書籍名を入力してください")
+            return
+        try:
+            preset = Preset(
+                name=name,
+                region=self.region_var.get().strip(),
+                tap=self.tap_var.get().strip(),
+                interval=float(self.interval_var.get()),
+                settle=float(self.settle_var.get()),
+            )
+            if preset.region:
+                Region.parse(preset.region)
+            if preset.tap:
+                cli.parse_point(preset.tap)
+            self.presets.put(preset)
+        except (ValueError, CaptureError, argparse.ArgumentTypeError, OSError) as e:
+            messagebox.showerror("プリセット", f"登録できません: {e}")
+            return
+        self.preset_combo["values"] = self.presets.names()
+        self.preset_var.set(name)
+        self.book_var.set(name)
+        self.progress_var.set(f"プリセット登録: {name}")
+
+    def delete_preset(self) -> None:
+        name = self.preset_var.get().strip()
+        if not name or self.presets.get(name) is None:
+            return
+        if not messagebox.askyesno("プリセット", f"『{name}』を削除しますか？"):
+            return
+        self.presets.delete(name)
+        self.preset_combo["values"] = self.presets.names()
+        self.preset_var.set("")
+        self.progress_var.set(f"プリセット削除: {name}")
+
+    # ============================================================== actions
     def _sequence_config(self, count: int) -> SequenceConfig:
-        out_dir = Path(self.out_var.get() or "output")
+        out_dir = self._output_dir()
         prefix = self.prefix_var.get()
         ext = self.format_var.get()
         region_text = self.region_var.get().strip()
@@ -771,6 +869,7 @@ class App:
             interval=float(self.interval_var.get()),
             settle=float(self.settle_var.get()),
             timeout=float(self.timeout_var.get()),
+            digits=self.args.digits,
         )
 
     def take_screenshot(self) -> None:

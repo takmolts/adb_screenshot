@@ -8,10 +8,12 @@ import re
 import signal
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import adb
-from .capture import CaptureError, Region, SequenceConfig, SequenceRunner
+from .capture import CaptureError, Region, SequenceConfig, SequenceRunner, book_dir
+from .presets import DEFAULT_PRESETS_PATH, PresetStore
 from .server import DEFAULT_SERVER_VERSION, ServerOptions
 from .session import Session
 
@@ -78,16 +80,23 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--height", type=int, help="端末の論理解像度を高さで上書き（wm size、幅は比率から自動計算）")
 
     g = p.add_argument_group("保存")
-    g.add_argument("-o", "--out", default="output", help="保存先ディレクトリ")
+    g.add_argument("-o", "--out", default="output", help="保存先のベースディレクトリ")
+    g.add_argument("--book", default="", help="書籍名（保存先が out/『書籍名 巻数』になる）")
+    g.add_argument("--volume", default="", help="巻数・号数（例: 12, 2026年40号）")
     g.add_argument("--prefix", default="", help="ファイル名プレフィックス")
+    g.add_argument("--digits", type=int, default=5, help="連番の桁数")
     g.add_argument("--format", choices=["png", "jpg"], default="png")
     g.add_argument("--region", type=Region.parse, help="切り出し領域 x,y,w,h（映像座標）")
+
+    g = p.add_argument_group("プリセット")
+    g.add_argument("--presets", help=f"プリセットファイル（既定: {DEFAULT_PRESETS_PATH}）")
+    g.add_argument("--preset", help="読み込むプリセット名（書籍名）。--region/--tap/--interval/--settle の未指定分を補う")
 
     g = p.add_argument_group("自動実行")
     g.add_argument("-n", "--count", type=int, default=1, help="スクリーンショット回数")
     g.add_argument("--tap", type=parse_point, help="各ショット後にタップする座標 x,y（映像座標）")
-    g.add_argument("--interval", type=float, default=1.0, help="タップ後の最小待ち時間 [s]")
-    g.add_argument("--settle", type=float, default=0.5, help="画面静止とみなす継続時間 [s]（0 で無効）")
+    g.add_argument("--interval", type=float, default=None, help="タップ後の最小待ち時間 [s]（既定 1.0）")
+    g.add_argument("--settle", type=float, default=None, help="画面静止とみなす継続時間 [s]（既定 0.5、0 で無効）")
     g.add_argument("--timeout", type=float, default=10.0, help="静止待ちの上限 [s]")
     g.add_argument("--start-delay", type=float, default=0.0, help="ヘッドレス実行開始前の待ち時間 [s]")
 
@@ -129,9 +138,57 @@ def make_session(
     )
 
 
+DEFAULT_INTERVAL = 1.0
+DEFAULT_SETTLE = 0.5
+
+
+@dataclass
+class CaptureParams:
+    """引数とプリセットを合成したキャプチャ設定。優先順: 明示引数 > プリセット > 既定値。"""
+
+    region: Region | None
+    tap: tuple[int, int] | None
+    interval: float
+    settle: float
+    book: str
+
+
+def resolve_capture_params(args: argparse.Namespace, store: PresetStore) -> CaptureParams:
+    preset = None
+    if args.preset:
+        preset = store.get(args.preset)
+        if preset is None:
+            raise CaptureError(f"プリセットが見つかりません: {args.preset!r}（登録済み: {', '.join(store.names()) or 'なし'}）")
+    region = args.region
+    tap = args.tap
+    interval = args.interval
+    settle = args.settle
+    book = args.book
+    if preset is not None:
+        if region is None and preset.region:
+            region = Region.parse(preset.region)
+        if tap is None and preset.tap:
+            tap = parse_point(preset.tap)
+        if interval is None:
+            interval = preset.interval
+        if settle is None:
+            settle = preset.settle
+        if not book:
+            book = preset.name
+    return CaptureParams(
+        region=region,
+        tap=tap,
+        interval=DEFAULT_INTERVAL if interval is None else interval,
+        settle=DEFAULT_SETTLE if settle is None else settle,
+        book=book,
+    )
+
+
 def run_headless(args: argparse.Namespace) -> int:
     """GUI なしで自動実行する。"""
-    out_dir = Path(args.out)
+    store = PresetStore(args.presets)
+    params = resolve_capture_params(args, store)
+    out_dir = book_dir(Path(args.out), params.book, args.volume)
     session = make_session(args)
     session.start()
     try:
@@ -150,12 +207,14 @@ def run_headless(args: argparse.Namespace) -> int:
             prefix=args.prefix,
             ext=args.format,
             start_index=next_index(out_dir, args.prefix, args.format),
-            region=args.region,
-            tap=args.tap,
-            interval=args.interval,
-            settle=args.settle,
+            region=params.region,
+            tap=params.tap,
+            interval=params.interval,
+            settle=params.settle,
             timeout=args.timeout,
+            digits=args.digits,
         )
+        log.info("保存先: %s（領域 %s / タップ %s）", out_dir, params.region or "全体", params.tap or "なし")
         runner = SequenceRunner(session.store, cfg, session.tap)
         signal.signal(signal.SIGINT, lambda *_: runner.stop())
         saved = runner.run()

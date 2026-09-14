@@ -144,9 +144,17 @@ class SequenceConfig:
     interval: float = 1.0  # タップ後の最小待ち時間 [s]
     settle: float = 0.5  # 画面が静止しているとみなす継続時間 [s]（0 で無効）
     timeout: float = 10.0  # 静止待ちの上限 [s]
+    digits: int = 5  # 連番の桁数
 
     def path_for(self, index: int) -> Path:
-        return self.out_dir / f"{self.prefix}{index:04d}.{self.ext}"
+        return self.out_dir / f"{self.prefix}{index:0{self.digits}d}.{self.ext}"
+
+
+def book_dir(base: Path, book: str = "", volume: str = "") -> Path:
+    """保存先ディレクトリ `base/{書籍名} {巻数}` を返す。書籍名・巻数が空ならその分を省く。"""
+    name = " ".join(part.strip() for part in (book, volume) if part and part.strip())
+    name = name.replace("/", "／").replace("\\", "＼")
+    return base / name if name else base
 
 
 class SequenceRunner:
