@@ -10,6 +10,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import adb
 from .capture import CaptureError, Region, SequenceConfig, SequenceRunner
 from .server import DEFAULT_SERVER_VERSION, ServerOptions
 from .session import Session
@@ -73,6 +74,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--new-display", help="仮想ディスプレイを作成して映す（例: 1920x1080/420）")
     g.add_argument("--allow-downsize", action="store_true",
                    help="エンコード失敗時にサーバー側の自動縮小を許可する（既定は失敗扱い）")
+    g.add_argument("--width", type=int, help="端末の論理解像度を幅で上書き（wm size、高さは比率から自動計算）")
+    g.add_argument("--height", type=int, help="端末の論理解像度を高さで上書き（wm size、幅は比率から自動計算）")
 
     g = p.add_argument_group("保存")
     g.add_argument("-o", "--out", default="output", help="保存先ディレクトリ")
@@ -102,16 +105,27 @@ def make_options(args: argparse.Namespace) -> ServerOptions:
         display_id=args.display_id,
         new_display=args.new_display,
         allow_downsize=args.allow_downsize,
+        log_level="debug" if args.verbose else "info",
     )
 
 
-def make_session(args: argparse.Namespace) -> Session:
+def make_session(
+    args: argparse.Namespace,
+    serial: str | None = None,
+    display_size: tuple[int, int] | None = None,
+) -> Session:
+    """引数から Session を組み立てる。serial / display_size は GUI からの上書き用。"""
+    serial = serial or args.serial
+    if display_size is None and (args.width or args.height):
+        physical, _ = adb.display_size(adb.resolve_serial(serial))
+        display_size = adb.scaled_size(physical, args.width, args.height)
     return Session(
-        args.serial,
+        serial,
         make_options(args),
         server_path=args.server,
         server_version=args.server_version,
         tap_method=args.tap_method,
+        display_size=display_size,
     )
 
 
