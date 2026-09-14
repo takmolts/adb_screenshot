@@ -183,6 +183,8 @@ class SequenceRunner:
         for i in range(cfg.count):
             if self.stop_event.is_set():
                 break
+            if self.store.closed:
+                raise CaptureError(f"映像ストリームが切断されました（{len(self.saved)} 枚保存済み）")
             frame, seq = self.store.get()
             assert frame is not None
             path = save_frame(frame, cfg.path_for(cfg.start_index + i), cfg.region)

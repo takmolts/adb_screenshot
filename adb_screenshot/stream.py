@@ -47,6 +47,13 @@ class FrameStore:
         self._time = 0.0
         self.video_size: tuple[int, int] | None = None  # セッションヘッダの (width, height)
         self._fps_window: list[float] = []
+        self.closed = False  # 受信スレッドが終了したら True（以降のフレームは更新されない）
+
+    def mark_closed(self) -> None:
+        """受信終了を記録し、待機中のスレッドを起こす。"""
+        with self._cond:
+            self.closed = True
+            self._cond.notify_all()
 
     def put(self, frame: av.VideoFrame) -> None:
         now = time.monotonic()
@@ -67,7 +74,7 @@ class FrameStore:
         """after_seq より新しいフレームが来るまで待つ。タイムアウト時は現状を返す。"""
         deadline = time.monotonic() + timeout
         with self._cond:
-            while self._seq <= after_seq:
+            while self._seq <= after_seq and not self.closed:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
@@ -129,6 +136,8 @@ class VideoStream(threading.Thread):
                 log.error("video stream error: %s", e)
                 if self._on_error:
                     self._on_error(e)
+        finally:
+            self.store.mark_closed()
 
     def _run(self) -> None:
         raw = recv_exact(self._sock, 4)
