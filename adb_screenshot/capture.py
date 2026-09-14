@@ -1,0 +1,214 @@
+"""スクリーンショット保存と「スクショ → タップ → スクショ …」の自動実行。"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+import av
+import numpy as np
+
+from .stream import FrameStore, frame_signature
+
+log = logging.getLogger(__name__)
+
+
+class CaptureError(RuntimeError):
+    """キャプチャ処理の失敗。"""
+
+
+@dataclass(frozen=True)
+class Region:
+    """映像座標系での切り出し領域。"""
+
+    x: int
+    y: int
+    w: int
+    h: int
+
+    @classmethod
+    def parse(cls, text: str) -> "Region":
+        """'x,y,w,h' 形式を解釈する。"""
+        try:
+            x, y, w, h = (int(v) for v in text.split(","))
+        except ValueError as e:
+            raise CaptureError(f"領域の書式が不正です（x,y,w,h）: {text!r}") from e
+        if w <= 0 or h <= 0:
+            raise CaptureError(f"領域の幅・高さは正である必要があります: {text!r}")
+        return cls(x, y, w, h)
+
+    def clamp(self, width: int, height: int) -> "Region":
+        """フレームの範囲に収める。"""
+        x0 = min(max(self.x, 0), width)
+        y0 = min(max(self.y, 0), height)
+        x1 = min(max(self.x + self.w, 0), width)
+        y1 = min(max(self.y + self.h, 0), height)
+        if x1 <= x0 or y1 <= y0:
+            raise CaptureError(f"領域がフレーム外です: {self} / frame {width}x{height}")
+        return Region(x0, y0, x1 - x0, y1 - y0)
+
+    def __str__(self) -> str:
+        return f"{self.x},{self.y},{self.w},{self.h}"
+
+
+def frame_to_image(frame: av.VideoFrame, region: Region | None = None):
+    """フレームを PIL Image（RGB）へ変換し、必要なら切り出す。"""
+    image = frame.to_image()
+    if region is not None:
+        r = region.clamp(frame.width, frame.height)
+        image = image.crop((r.x, r.y, r.x + r.w, r.y + r.h))
+    return image
+
+
+def save_frame(frame: av.VideoFrame, path: Path, region: Region | None = None) -> Path:
+    """フレームをファイルへ保存する。拡張子で形式を決める。"""
+    image = frame_to_image(frame, region)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.suffix.lower() in (".jpg", ".jpeg"):
+        image.save(path, quality=95)
+    else:
+        image.save(path)
+    return path
+
+
+def wait_settled(
+    store: FrameStore,
+    *,
+    after_seq: int,
+    min_wait: float,
+    settle: float,
+    timeout: float,
+    stop: threading.Event | None = None,
+    threshold: float = 1.0,
+) -> bool:
+    """タップ後に画面が落ち着くまで待つ。
+
+    - after_seq より新しいフレームを受信し、かつ min_wait 秒経過するまで待つ
+    - settle > 0 なら、縮小画像の差分が threshold 未満の状態が settle 秒続くまで待つ
+    - timeout 秒で打ち切り（False を返す）
+    """
+    t0 = time.monotonic()
+    deadline = t0 + timeout
+
+    def _stopped() -> bool:
+        return stop is not None and stop.is_set()
+
+    # 新しいフレーム + 最小待ち時間
+    _, seq = store.wait_new(after_seq, timeout=max(0.0, deadline - time.monotonic()))
+    while time.monotonic() - t0 < min_wait:
+        if _stopped():
+            return False
+        time.sleep(min(0.05, max(0.0, min_wait - (time.monotonic() - t0))))
+
+    if settle <= 0:
+        return True
+
+    last_sig: np.ndarray | None = None
+    stable_since: float | None = None
+    while time.monotonic() < deadline and not _stopped():
+        frame, seq = store.get()
+        if frame is None:
+            time.sleep(0.05)
+            continue
+        sig = frame_signature(frame)
+        now = time.monotonic()
+        if last_sig is not None and sig.shape == last_sig.shape:
+            diff = float(np.abs(sig - last_sig).mean())
+            log.debug("settle: seq=%d diff=%.2f elapsed=%.2fs", seq, diff, now - t0)
+            if diff < threshold:
+                stable_since = stable_since if stable_since is not None else now
+                if now - stable_since >= settle:
+                    return True
+            else:
+                stable_since = None
+        last_sig = sig
+        store.wait_new(seq, timeout=min(0.5, max(0.0, deadline - now)))
+    return False
+
+
+@dataclass
+class SequenceConfig:
+    """自動実行の設定。"""
+
+    count: int
+    out_dir: Path
+    prefix: str = ""
+    ext: str = "png"
+    start_index: int = 1
+    region: Region | None = None
+    tap: tuple[int, int] | None = None
+    interval: float = 1.0  # タップ後の最小待ち時間 [s]
+    settle: float = 0.5  # 画面が静止しているとみなす継続時間 [s]（0 で無効）
+    timeout: float = 10.0  # 静止待ちの上限 [s]
+
+    def path_for(self, index: int) -> Path:
+        return self.out_dir / f"{self.prefix}{index:04d}.{self.ext}"
+
+
+class SequenceRunner:
+    """スクショ → タップ → 待機 を count 回繰り返す。"""
+
+    def __init__(
+        self,
+        store: FrameStore,
+        config: SequenceConfig,
+        tap_func: Callable[[int, int], None] | None,
+        on_progress: Callable[[int, int, Path], None] | None = None,
+    ) -> None:
+        self.store = store
+        self.config = config
+        self._tap = tap_func
+        self._on_progress = on_progress
+        self.stop_event = threading.Event()
+        self.saved: list[Path] = []
+
+    def stop(self) -> None:
+        self.stop_event.set()
+
+    def run(self) -> list[Path]:
+        cfg = self.config
+        if cfg.tap is not None and self._tap is None:
+            raise CaptureError("タップ手段が設定されていません")
+
+        frame, seq = self.store.get()
+        if frame is None:
+            frame, seq = self.store.wait_new(0, timeout=cfg.timeout)
+            if frame is None:
+                raise CaptureError("映像フレームをまだ受信していません")
+
+        for i in range(cfg.count):
+            if self.stop_event.is_set():
+                break
+            frame, seq = self.store.get()
+            assert frame is not None
+            path = save_frame(frame, cfg.path_for(cfg.start_index + i), cfg.region)
+            self.saved.append(path)
+            log.info("saved %d/%d: %s (%dx%d)", i + 1, cfg.count, path, frame.width, frame.height)
+            if self._on_progress:
+                self._on_progress(i + 1, cfg.count, path)
+
+            if i == cfg.count - 1:
+                break
+            if cfg.tap is None:
+                # タップなしの連続保存: interval だけ待つ
+                if self.stop_event.wait(cfg.interval):
+                    break
+                self.store.wait_new(seq, timeout=1.0)
+                continue
+            assert self._tap is not None
+            self._tap(*cfg.tap)
+            ok = wait_settled(
+                self.store,
+                after_seq=seq,
+                min_wait=cfg.interval,
+                settle=cfg.settle,
+                timeout=cfg.timeout,
+                stop=self.stop_event,
+            )
+            if not ok and not self.stop_event.is_set():
+                log.warning("画面の静止を %.1fs 以内に確認できませんでした（そのまま続行）", cfg.timeout)
+        return self.saved
