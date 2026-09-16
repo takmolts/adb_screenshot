@@ -100,12 +100,33 @@ class FrameStore:
             return self._frame.width, self._frame.height
 
 
+# PyAV の VideoFrame はフレームごとに 1 つの変換コンテキスト (SwsContext) を共有しており、
+# reformat() / to_image() / to_ndarray() を複数スレッド（GUI 描画と撮影ループなど）から
+# 同時に呼ぶと libswscale 内でデッドロックする。フレーム変換は必ずこのロックの中で行う。
+CONVERT_LOCK = threading.Lock()
+
+
+def frame_to_rgb(frame: av.VideoFrame, width: int | None = None, height: int | None = None) -> np.ndarray:
+    """フレームを RGB24 の ndarray へ変換する（必要なら縮小）。"""
+    with CONVERT_LOCK:
+        if width is not None and height is not None:
+            return frame.reformat(width=width, height=height, format="rgb24").to_ndarray()
+        return frame.to_ndarray(format="rgb24")
+
+
+def frame_to_pil(frame: av.VideoFrame):
+    """フレームを PIL Image（RGB）へ変換する。"""
+    with CONVERT_LOCK:
+        return frame.to_image()
+
+
 def frame_signature(frame: av.VideoFrame, shrink: int = 8) -> np.ndarray:
     """変化検出用に縮小したグレースケール配列を返す。"""
     w = max(1, frame.width // shrink)
     h = max(1, frame.height // shrink)
-    small = frame.reformat(width=w, height=h, format="gray")
-    return small.to_ndarray().astype(np.int16)
+    with CONVERT_LOCK:
+        small = frame.reformat(width=w, height=h, format="gray").to_ndarray()
+    return small.astype(np.int16)
 
 
 class VideoStream(threading.Thread):

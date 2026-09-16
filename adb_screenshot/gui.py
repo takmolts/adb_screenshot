@@ -26,6 +26,7 @@ from .capture import CaptureError, Region, SequenceConfig, SequenceRunner, book_
 from .control import ACTION_DOWN, ACTION_MOVE, ACTION_UP
 from .presets import Preset, PresetStore
 from .session import Session
+from .stream import frame_to_rgb
 
 log = logging.getLogger(__name__)
 
@@ -592,7 +593,7 @@ class App:
 
         if scale <= 1.0:
             # 縮小: swscale で全体を縮小してから可視部分を切り出す
-            full = frame.reformat(width=max(1, round(fw * scale)), height=max(1, round(fh * scale)), format="rgb24").to_ndarray()
+            full = frame_to_rgb(frame, max(1, round(fw * scale)), max(1, round(fh * scale)))
             cx0, cy0 = round(sx0 * scale), round(sy0 * scale)
             cx1, cy1 = round(sx1 * scale), round(sy1 * scale)
             rgb = np.ascontiguousarray(full[cy0:cy1, cx0:cx1])
@@ -600,7 +601,7 @@ class App:
         else:
             # 拡大: 可視部分だけ切り出して最近傍で拡大（ピクセル境界が見える）
             if self._rgb_cache is None or self._rgb_cache[0] != seq:
-                self._rgb_cache = (seq, frame.to_ndarray(format="rgb24"))
+                self._rgb_cache = (seq, frame_to_rgb(frame))
             crop = self._rgb_cache[1][sy0:sy1, sx0:sx1]
             dw = max(1, round((sx1 - sx0) * scale))
             dh = max(1, round((sy1 - sy0) * scale))

@@ -12,7 +12,7 @@ from typing import Callable
 import av
 import numpy as np
 
-from .stream import FrameStore, frame_signature
+from .stream import FrameStore, frame_signature, frame_to_pil
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ class Region:
 
 def frame_to_image(frame: av.VideoFrame, region: Region | None = None):
     """フレームを PIL Image（RGB）へ変換し、必要なら切り出す。"""
-    image = frame.to_image()
+    image = frame_to_pil(frame)
     if region is not None:
         r = region.clamp(frame.width, frame.height)
         image = image.crop((r.x, r.y, r.x + r.w, r.y + r.h))
