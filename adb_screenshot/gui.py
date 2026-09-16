@@ -14,6 +14,7 @@ import math
 import queue
 import signal
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -970,7 +971,18 @@ def run_gui(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, _on_signal)
 
     # シグナルハンドラは Python のバイトコード実行中にしか走らないため、定期的に起こす
+    last_beat = [time.monotonic()]
+
     def _tick() -> None:
+        now = time.monotonic()
+        if now - last_beat[0] >= 1.0:  # -v 時のみ: Tk ループと映像受信の生存確認
+            last_beat[0] = now
+            store = app.session.store if app.session is not None else None
+            log.debug(
+                "heartbeat seq=%s fps=%s closed=%s runner=%s",
+                store.seq if store else "-", f"{store.fps:.0f}" if store else "-",
+                store.closed if store else "-", app.runner is not None,
+            )
         root.after(200, _tick)
 
     _tick()

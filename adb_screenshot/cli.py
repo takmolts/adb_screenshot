@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import logging
 import re
 import signal
@@ -238,6 +239,10 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    # フリーズ調査用: `kill -USR1 <pid>` で全スレッドのスタックを stderr へ出す
+    faulthandler.enable()
+    if hasattr(signal, "SIGUSR1"):
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
     try:
         if args.no_gui:
             return run_headless(args)
