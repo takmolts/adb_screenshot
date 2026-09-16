@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import adb
-from .capture import CaptureError, Region, SequenceConfig, SequenceRunner, book_dir
+from .capture import DEFAULT_JPEG_QUALITY, CaptureError, Region, SequenceConfig, SequenceRunner, book_dir
 from .presets import DEFAULT_PRESETS_PATH, PresetStore
 from .server import DEFAULT_SERVER_VERSION, ServerOptions
 from .session import Session
@@ -86,6 +86,9 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--prefix", default="", help="ファイル名プレフィックス")
     g.add_argument("--digits", type=int, default=5, help="連番の桁数")
     g.add_argument("--format", choices=["png", "jpg"], default="png")
+    g.add_argument(
+        "--quality", type=int, default=DEFAULT_JPEG_QUALITY, help="JPEG 品質 1〜95（--format jpg のときのみ有効）"
+    )
     g.add_argument("--region", type=Region.parse, help="切り出し領域 x,y,w,h（映像座標）")
 
     g = p.add_argument_group("プリセット")
@@ -213,6 +216,7 @@ def run_headless(args: argparse.Namespace) -> int:
             settle=params.settle,
             timeout=args.timeout,
             digits=args.digits,
+            quality=args.quality,
         )
         log.info("保存先: %s（領域 %s / タップ %s）", out_dir, params.region or "全体", params.tap or "なし")
         runner = SequenceRunner(session.store, cfg, session.tap)

@@ -101,6 +101,7 @@ class App:
         self.out_var = tk.StringVar(value=args.out)
         self.prefix_var = tk.StringVar(value=args.prefix)
         self.format_var = tk.StringVar(value=args.format)
+        self.quality_var = tk.StringVar(value=str(args.quality))
         for var in (self.out_var, self.book_var, self.volume_var, self.prefix_var, self.format_var):
             var.trace_add("write", lambda *_: self._update_save_path())
         self.status_var = tk.StringVar(value="未接続")
@@ -262,7 +263,11 @@ class App:
         row += 1
         add_entry("プレフィックス", self.prefix_var)
         ttk.Label(panel, text="形式").grid(row=row, column=0, sticky="w")
-        ttk.Combobox(panel, textvariable=self.format_var, values=("png", "jpg"), width=6, state="readonly").grid(row=row, column=1, sticky="w")
+        fmt = ttk.Frame(panel)
+        fmt.grid(row=row, column=1, columnspan=2, sticky="w")
+        ttk.Combobox(fmt, textvariable=self.format_var, values=("png", "jpg"), width=6, state="readonly").pack(side="left")
+        ttk.Label(fmt, text="JPEG品質").pack(side="left", padx=(8, 2))
+        ttk.Spinbox(fmt, textvariable=self.quality_var, from_=1, to=95, width=4).pack(side="left")
         row += 1
 
         row += 1
@@ -870,6 +875,7 @@ class App:
             settle=float(self.settle_var.get()),
             timeout=float(self.timeout_var.get()),
             digits=self.args.digits,
+            quality=int(self.quality_var.get()),
         )
 
     def take_screenshot(self) -> None:
@@ -882,7 +888,7 @@ class App:
             return
         try:
             cfg = self._sequence_config(1)
-            path = save_frame(frame, cfg.path_for(cfg.start_index), cfg.region)
+            path = save_frame(frame, cfg.path_for(cfg.start_index), cfg.region, cfg.quality)
         except (CaptureError, ValueError, argparse.ArgumentTypeError, OSError) as e:
             messagebox.showerror("保存失敗", str(e))
             return

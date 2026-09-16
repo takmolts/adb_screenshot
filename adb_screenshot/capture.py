@@ -64,12 +64,17 @@ def frame_to_image(frame: av.VideoFrame, region: Region | None = None):
     return image
 
 
-def save_frame(frame: av.VideoFrame, path: Path, region: Region | None = None) -> Path:
-    """フレームをファイルへ保存する。拡張子で形式を決める。"""
+DEFAULT_JPEG_QUALITY = 75  # adb screencap ベースのツールと同程度のファイルサイズになる値
+
+
+def save_frame(
+    frame: av.VideoFrame, path: Path, region: Region | None = None, quality: int = DEFAULT_JPEG_QUALITY
+) -> Path:
+    """フレームをファイルへ保存する。拡張子で形式を決める。quality は JPEG のみ有効（1〜95）。"""
     image = frame_to_image(frame, region)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.suffix.lower() in (".jpg", ".jpeg"):
-        image.save(path, quality=95)
+        image.save(path, quality=max(1, min(95, quality)), optimize=True)
     else:
         image.save(path)
     return path
@@ -145,6 +150,7 @@ class SequenceConfig:
     settle: float = 0.5  # 画面が静止しているとみなす継続時間 [s]（0 で無効）
     timeout: float = 10.0  # 静止待ちの上限 [s]
     digits: int = 5  # 連番の桁数
+    quality: int = DEFAULT_JPEG_QUALITY  # JPEG 品質（1〜95）
 
     def path_for(self, index: int) -> Path:
         return self.out_dir / f"{self.prefix}{index:0{self.digits}d}.{self.ext}"
@@ -195,7 +201,7 @@ class SequenceRunner:
                 raise CaptureError(f"映像ストリームが切断されました（{len(self.saved)} 枚保存済み）")
             frame, seq = self.store.get()
             assert frame is not None
-            path = save_frame(frame, cfg.path_for(cfg.start_index + i), cfg.region)
+            path = save_frame(frame, cfg.path_for(cfg.start_index + i), cfg.region, cfg.quality)
             self.saved.append(path)
             log.info("saved %d/%d: %s (%dx%d)", i + 1, cfg.count, path, frame.width, frame.height)
             if self._on_progress:

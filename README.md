@@ -96,6 +96,7 @@ python3 main.py --no-gui -n 100 --preset "週刊少年ジャンプ" --volume "20
 | `--tap-method` | `scrcpy` | `scrcpy`（制御ソケット）/ `adb`（`input tap`） |
 | `--display-id` / `--new-display` | なし | 別ディスプレイ／仮想ディスプレイを映す |
 | `--format` | `png` | `png` / `jpg` |
+| `--quality` | `75` | JPEG 品質 1〜95（`jpg` のみ）。`adb screencap` 系ツールの既定と同程度のサイズになる |
 
 ## 注意点
 
