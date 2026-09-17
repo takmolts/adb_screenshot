@@ -40,6 +40,7 @@ MODE_CURSORS = {MODE_CONTROL: "crosshair", MODE_REGION: "crosshair", MODE_TAP: "
 
 RENDER_INTERVAL_MS = 33
 HANDLE_HALF = 5  # 四隅ハンドルの半径 [px]
+OVERLAY_PAD = 4  # 進捗オーバーレイの余白 [px]
 HANDLE_HIT = 9  # ハンドル判定の許容距離 [px]
 ZOOM_STEP = 1.5
 ZOOM_MAX = 32.0
@@ -182,6 +183,11 @@ class App:
         ]
         self._tap_h = self.canvas.create_line(0, 0, 0, 0, fill="#40e0ff", width=2, state="hidden")
         self._tap_v = self.canvas.create_line(0, 0, 0, 0, fill="#40e0ff", width=2, state="hidden")
+        # 連続撮影中の進捗（映像左上に小さく重ねる）
+        self._overlay_bg = self.canvas.create_rectangle(0, 0, 0, 0, fill="#000000", outline="", state="hidden")
+        self._overlay_text = self.canvas.create_text(
+            OVERLAY_PAD, OVERLAY_PAD, anchor="nw", fill="#ffffff", font=("TkDefaultFont", 10), state="hidden"
+        )
 
     def _build_zoom_bar(self) -> None:
         bar = ttk.Frame(self.root, padding=(8, 4))
@@ -463,8 +469,8 @@ class App:
         elif kind == "stream_error":
             self.status_var.set(f"映像エラー: {payload}")
         elif kind == "progress":
-            done, total, path = payload
-            self.progress_var.set(f"{done}/{total} 保存: {Path(path).name}")
+            self.progress_var.set(f"{payload.summary()}  保存: {payload.path.name}")
+            self._set_overlay(payload.summary())
         elif kind == "sequence_done":
             self._sequence_finished(payload)
 
@@ -646,8 +652,21 @@ class App:
         else:
             self.canvas.itemconfigure(self._tap_h, state="hidden")
             self.canvas.itemconfigure(self._tap_v, state="hidden")
-        for item in (self._region_item, *self._handles, self._tap_h, self._tap_v):
+        for item in (self._region_item, *self._handles, self._tap_h, self._tap_v, self._overlay_bg, self._overlay_text):
             self.canvas.tag_raise(item)
+
+    def _set_overlay(self, text: str | None) -> None:
+        """映像左上の進捗表示を更新する。None で非表示。"""
+        if not text:
+            self.canvas.itemconfigure(self._overlay_bg, state="hidden")
+            self.canvas.itemconfigure(self._overlay_text, state="hidden")
+            return
+        self.canvas.itemconfigure(self._overlay_text, text=text, state="normal")
+        x0, y0, x1, y1 = self.canvas.bbox(self._overlay_text)
+        self.canvas.coords(self._overlay_bg, x0 - OVERLAY_PAD, y0 - OVERLAY_PAD, x1 + OVERLAY_PAD, y1 + OVERLAY_PAD)
+        self.canvas.itemconfigure(self._overlay_bg, state="normal")
+        self.canvas.tag_raise(self._overlay_bg)
+        self.canvas.tag_raise(self._overlay_text)
 
     def _parse_region(self) -> Region | None:
         text = self.region_var.get().strip()
@@ -916,12 +935,13 @@ class App:
             session.store,
             cfg,
             session.tap,
-            on_progress=lambda d, t, p: self._events.put(("progress", (d, t, p))),
+            on_progress=lambda progress: self._events.put(("progress", progress)),
         )
         self.runner = runner
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         self.progress_var.set(f"自動実行開始: {cfg.count} 回")
+        self._set_overlay(f"0/{cfg.count} 枚  開始")
 
         def worker() -> None:
             try:
@@ -942,6 +962,7 @@ class App:
         self.start_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
         n = len(runner.saved) if runner else 0
+        self._set_overlay(None)
         if error is not None:
             self.progress_var.set(f"自動実行エラー（{n} 枚保存）: {error}")
             messagebox.showerror("自動実行エラー", str(error))

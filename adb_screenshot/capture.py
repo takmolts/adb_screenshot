@@ -163,6 +163,40 @@ def book_dir(base: Path, book: str = "", volume: str = "") -> Path:
     return base / name if name else base
 
 
+@dataclass(frozen=True)
+class Progress:
+    """自動実行の進捗。1 枚保存するごとに on_progress へ渡される。"""
+
+    done: int  # 保存済み枚数（今保存した分を含む）
+    total: int
+    path: Path
+    elapsed: float  # 開始からの経過秒
+    eta: float | None  # 残り目安秒（1 枚目の直後など推定できないときは None）
+
+    @property
+    def remaining(self) -> int:
+        return self.total - self.done
+
+    def summary(self) -> str:
+        """'12/300 枚  残り約 4 分' のような短い表示。"""
+        text = f"{self.done}/{self.total} 枚"
+        if self.remaining > 0:
+            text += f"  残り約 {format_duration(self.eta)}" if self.eta is not None else "  残り時間 計測中"
+        return text
+
+
+def format_duration(seconds: float) -> str:
+    """秒数を '30 秒' / '4 分' / '1 時間 20 分' 形式にする。"""
+    seconds = max(0.0, seconds)
+    if seconds < 60:
+        return f"{int(round(seconds))} 秒"
+    minutes = int(round(seconds / 60))
+    if minutes < 60:
+        return f"{minutes} 分"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} 時間 {minutes} 分" if minutes else f"{hours} 時間"
+
+
 class SequenceRunner:
     """スクショ → タップ → 待機 を count 回繰り返す。"""
 
@@ -171,7 +205,7 @@ class SequenceRunner:
         store: FrameStore,
         config: SequenceConfig,
         tap_func: Callable[[int, int], None] | None,
-        on_progress: Callable[[int, int, Path], None] | None = None,
+        on_progress: Callable[[Progress], None] | None = None,
     ) -> None:
         self.store = store
         self.config = config
@@ -179,9 +213,21 @@ class SequenceRunner:
         self._on_progress = on_progress
         self.stop_event = threading.Event()
         self.saved: list[Path] = []
+        self.progress: Progress | None = None
 
     def stop(self) -> None:
         self.stop_event.set()
+
+    def _make_progress(self, done: int, path: Path, elapsed: float) -> Progress:
+        """経過時間から残り目安を出す。1 枚目はタップ待ちを含まないので推定しない。"""
+        total = self.config.count
+        eta = None
+        if done >= 2 and done < total:
+            # 1 枚目は「保存だけ」なので除き、2 枚目以降の「タップ→待機→保存」の平均で見積もる
+            eta = elapsed / (done - 1) * (total - done)
+        elif done >= total:
+            eta = 0.0
+        return Progress(done=done, total=total, path=path, elapsed=elapsed, eta=eta)
 
     def run(self) -> list[Path]:
         cfg = self.config
@@ -194,6 +240,7 @@ class SequenceRunner:
             if frame is None:
                 raise CaptureError("映像フレームをまだ受信していません")
 
+        started = time.monotonic()
         for i in range(cfg.count):
             if self.stop_event.is_set():
                 break
@@ -203,9 +250,11 @@ class SequenceRunner:
             assert frame is not None
             path = save_frame(frame, cfg.path_for(cfg.start_index + i), cfg.region, cfg.quality)
             self.saved.append(path)
-            log.info("saved %d/%d: %s (%dx%d)", i + 1, cfg.count, path, frame.width, frame.height)
+            progress = self._make_progress(i + 1, path, time.monotonic() - started)
+            self.progress = progress
+            log.info("saved %s: %s (%dx%d)", progress.summary(), path, frame.width, frame.height)
             if self._on_progress:
-                self._on_progress(i + 1, cfg.count, path)
+                self._on_progress(progress)
 
             if i == cfg.count - 1:
                 break
