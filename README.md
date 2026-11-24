@@ -63,13 +63,13 @@ python3 main.py
   巻数が空なら `保存先ベース/書籍名/`、両方空ならベース直下です
 - **スクリーンショット**: 現在のフレームを受信解像度で保存
 - **自動実行 開始**: 回数ぶん「保存 → タップ → 待機」を繰り返す
-- 保存ファイル名は `prefix + 00001.png` の 5 桁連番。既存ファイルの続きから採番します
+- 保存ファイル名は `prefix + 00001.jpg` の 5 桁連番（`--format png` なら .png）。既存ファイルの続きから採番します
 
 ### CLI（GUI なし）
 
 ```bash
 # 100 ページ分、(50,1000) をタップしながら 0,84,1116,1836 の領域を
-# output/週刊少年ジャンプ 2026年40号/00001.png … に保存
+# output/週刊少年ジャンプ 2026年40号/00001.jpg … に保存
 python3 main.py --no-gui -n 100 --tap 50,1000 --region 0,84,1116,1836 \
     --interval 1.0 --settle 0.5 --book "週刊少年ジャンプ" --volume "2026年40号"
 
@@ -98,7 +98,7 @@ python3 main.py --no-gui -n 100 --preset "週刊少年ジャンプ" --volume "20
 | `--timeout` | `10` | 静止待ちの上限 [s]。超えても続行する |
 | `--tap-method` | `scrcpy` | `scrcpy`（制御ソケット）/ `adb`（`input tap`） |
 | `--display-id` / `--new-display` | なし | 別ディスプレイ／仮想ディスプレイを映す |
-| `--format` | `png` | `png` / `jpg` |
+| `--format` | `jpg` | `png` / `jpg` |
 | `--quality` | `75` | JPEG 品質 1〜95（`jpg` のみ）。`adb screencap` 系ツールの既定と同程度のサイズになる |
 
 ## 注意点

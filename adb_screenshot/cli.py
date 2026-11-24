@@ -86,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--volume", default="", help="巻数・号数（例: 12, 2026年40号）")
     g.add_argument("--prefix", default="", help="ファイル名プレフィックス")
     g.add_argument("--digits", type=int, default=5, help="連番の桁数")
-    g.add_argument("--format", choices=["png", "jpg"], default="png")
+    g.add_argument("--format", choices=["png", "jpg"], default="jpg")
     g.add_argument(
         "--quality", type=int, default=DEFAULT_JPEG_QUALITY, help="JPEG 品質 1〜95（--format jpg のときのみ有効）"
     )
