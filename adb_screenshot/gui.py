@@ -25,7 +25,7 @@ from PIL import Image
 from . import adb, cli
 from .capture import CaptureError, Region, SequenceConfig, SequenceRunner, book_dir, save_frame
 from .control import ACTION_DOWN, ACTION_MOVE, ACTION_UP
-from .presets import Preset, PresetStore
+from .presets import PRESETS_DIR, Preset, PresetStore, device_presets_path
 from .session import Session
 from .stream import frame_to_rgb
 
@@ -79,16 +79,17 @@ class App:
         self.width_var = tk.StringVar(value=str(args.width) if args.width else "")
         self.height_var = tk.StringVar(value=str(args.height) if args.height else "")
 
-        # プリセット（引数 > プリセット > 既定値 の順で初期値を決める）
-        self.presets = PresetStore(args.presets)
-        try:
-            params = cli.resolve_capture_params(args, self.presets)
-            preset_error: str | None = None
-        except CaptureError as e:
-            preset_error = str(e)
-            args_no_preset = argparse.Namespace(**{**vars(args), "preset": None})
-            params = cli.resolve_capture_params(args_no_preset, self.presets)
-        self.preset_var = tk.StringVar(value=args.preset or "")
+        # プリセット: --presets 指定時はそのファイルに固定。未指定なら接続した端末の
+        # 機種名で presets/<機種名>.json を開き、未接続の間はプリセットを使えない。
+        # 初期値は 引数 > プリセット > 既定値。--preset はプリセットを開いた時点で適用する。
+        self.presets: PresetStore | None = None
+        self._presets_fixed = bool(args.presets)
+        self._pending_preset: str | None = args.preset
+        self._preset_model: str | None = None
+        args_no_preset = argparse.Namespace(**{**vars(args), "preset": None})
+        params = cli.resolve_capture_params(args_no_preset, None)
+        self.preset_var = tk.StringVar(value="")
+        self.preset_file_var = tk.StringVar(value="")
         self.book_var = tk.StringVar(value=params.book)
         self.volume_var = tk.StringVar(value=args.volume)
         self.save_path_var = tk.StringVar(value="")
@@ -121,8 +122,10 @@ class App:
         root.after(100, self._poll_events)
         root.after(RENDER_INTERVAL_MS, self._render_loop)
         root.after(50, self._refresh_devices)
-        if preset_error:
-            root.after(200, lambda: messagebox.showwarning("プリセット", preset_error))
+        if self._presets_fixed:
+            root.after(200, lambda: self._set_preset_store(PresetStore(args.presets)))
+        else:
+            self._set_preset_store(None)
 
     # ================================================================ widgets
     def _build_widgets(self) -> None:
@@ -216,15 +219,23 @@ class App:
             row += 1
 
         add_label("書籍プリセット")
-        self.preset_combo = ttk.Combobox(panel, textvariable=self.preset_var, values=self.presets.names(), width=16)
+        ttk.Label(panel, textvariable=self.preset_file_var, foreground="#666", wraplength=240).grid(
+            row=row, column=0, columnspan=3, sticky="w"
+        )
+        row += 1
+        self.preset_combo = ttk.Combobox(panel, textvariable=self.preset_var, values=[], width=16, state="disabled")
         self.preset_combo.grid(row=row, column=0, columnspan=3, sticky="we")
         self.preset_combo.bind("<<ComboboxSelected>>", lambda _e: self.load_preset())
         row += 1
         btns = ttk.Frame(panel)
         btns.grid(row=row, column=0, columnspan=3, sticky="we")
-        ttk.Button(btns, text="読込", width=6, command=self.load_preset).pack(side="left")
-        ttk.Button(btns, text="登録/更新", width=9, command=self.save_preset).pack(side="left", padx=2)
-        ttk.Button(btns, text="削除", width=6, command=self.delete_preset).pack(side="left")
+        self.preset_buttons = [
+            ttk.Button(btns, text="読込", width=6, command=self.load_preset, state="disabled"),
+            ttk.Button(btns, text="登録/更新", width=9, command=self.save_preset, state="disabled"),
+            ttk.Button(btns, text="削除", width=6, command=self.delete_preset, state="disabled"),
+        ]
+        for i, b in enumerate(self.preset_buttons):
+            b.pack(side="left", padx=2 if i == 1 else 0)
         row += 1
         add_entry("書籍名", self.book_var)
         add_entry("巻数・号", self.volume_var)
@@ -388,10 +399,11 @@ class App:
                     adb.connect(address)
                 physical, _ = adb.display_size(address)
                 size = adb.scaled_size(physical, width, height) if (width or height) else None
+                model = None if self._presets_fixed else adb.device_model(address)
                 session = cli.make_session(self.args, serial=address, display_size=size)
                 session.on_stream_error = lambda e: self._events.put(("stream_error", e))
                 session.start()
-                self._events.put(("connected", session))
+                self._events.put(("connected", (session, model)))
             except Exception as e:  # noqa: BLE001 - GUI へ通知する
                 self._events.put(("connect_error", e))
 
@@ -451,7 +463,10 @@ class App:
             self.status_var.set(str(payload))
         elif kind == "connected":
             self._connecting = False
+            payload, model = payload
             self.session = payload
+            if model is not None:
+                self._set_preset_store(PresetStore(device_presets_path(model)), model)
             self.disconnect_btn.configure(state="normal")
             self.fit = True
             self._mark_view_dirty()
@@ -464,6 +479,8 @@ class App:
             messagebox.showerror("接続失敗", str(payload))
         elif kind == "disconnected":
             self.connect_btn.configure(state="normal")
+            if not self._presets_fixed:
+                self._set_preset_store(None)
             self.status_var.set("未接続")
             self._fetch_physical_size()
         elif kind == "stream_error":
@@ -822,7 +839,50 @@ class App:
     def _update_save_path(self) -> None:
         self.save_path_var.set(f"→ {self._output_dir()}/{self.prefix_var.get()}00001.{self.format_var.get()}")
 
+    def _set_preset_store(self, store: PresetStore | None, model: str | None = None) -> None:
+        """使用するプリセットファイルを切り替える。None なら未接続としてプリセット操作を無効にする。"""
+        self.presets = store
+        self._preset_model = model
+        self.preset_var.set("")
+        state = "disabled" if store is None else "normal"
+        self.preset_combo.configure(values=store.names() if store else [], state=state)
+        for b in self.preset_buttons:
+            b.configure(state=state)
+        self._update_preset_label()
+        if store is None:
+            return
+        log.info("プリセットファイル: %s", store.path)
+
+        if self._pending_preset:
+            name, self._pending_preset = self._pending_preset, None
+            try:
+                params = cli.resolve_capture_params(self.args, store)
+            except CaptureError as e:
+                messagebox.showwarning("プリセット", str(e))
+                return
+            self.preset_var.set(name)
+            self.book_var.set(params.book)
+            self.region_var.set(str(params.region) if params.region else "")
+            self.tap_var.set(f"{params.tap[0]},{params.tap[1]}" if params.tap else "")
+            self.interval_var.set(f"{params.interval:g}")
+            self.settle_var.set(f"{params.settle:g}")
+            self._draw_overlays()
+
+    def _update_preset_label(self) -> None:
+        store = self.presets
+        if store is None:
+            self.preset_file_var.set("未接続（接続すると端末のプリセットを開きます）")
+            return
+        try:
+            shown = store.path.relative_to(PRESETS_DIR.parent)
+        except ValueError:
+            shown = store.path
+        label = f"{shown}（{len(store.names())} 件）" if store.path.is_file() else f"{shown}（新規）"
+        self.preset_file_var.set(f"{self._preset_model}: {label}" if self._preset_model else label)
+
     def load_preset(self) -> None:
+        if self.presets is None:
+            return
         name = self.preset_var.get().strip()
         preset = self.presets.get(name)
         if preset is None:
@@ -839,6 +899,8 @@ class App:
         self.progress_var.set(f"プリセット読込: {preset.name}")
 
     def save_preset(self) -> None:
+        if self.presets is None:
+            return
         name = self.book_var.get().strip() or self.preset_var.get().strip()
         if not name:
             messagebox.showerror("プリセット", "書籍名を入力してください")
@@ -860,18 +922,20 @@ class App:
             messagebox.showerror("プリセット", f"登録できません: {e}")
             return
         self.preset_combo["values"] = self.presets.names()
+        self._update_preset_label()
         self.preset_var.set(name)
         self.book_var.set(name)
         self.progress_var.set(f"プリセット登録: {name}")
 
     def delete_preset(self) -> None:
         name = self.preset_var.get().strip()
-        if not name or self.presets.get(name) is None:
+        if self.presets is None or not name or self.presets.get(name) is None:
             return
         if not messagebox.askyesno("プリセット", f"『{name}』を削除しますか？"):
             return
         self.presets.delete(name)
         self.preset_combo["values"] = self.presets.names()
+        self._update_preset_label()
         self.preset_var.set("")
         self.progress_var.set(f"プリセット削除: {name}")
 

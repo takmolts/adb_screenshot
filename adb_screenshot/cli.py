@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import adb
 from .capture import DEFAULT_JPEG_QUALITY, CaptureError, Region, SequenceConfig, SequenceRunner, book_dir
-from .presets import DEFAULT_PRESETS_PATH, PresetStore
+from .presets import PRESETS_DIR, PresetStore, device_presets_path
 from .server import DEFAULT_SERVER_VERSION, ServerOptions
 from .session import Session
 
@@ -93,7 +93,10 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--region", type=Region.parse, help="切り出し領域 x,y,w,h（映像座標）")
 
     g = p.add_argument_group("プリセット")
-    g.add_argument("--presets", help=f"プリセットファイル（既定: {DEFAULT_PRESETS_PATH}）")
+    g.add_argument(
+        "--presets",
+        help=f"プリセットファイル（既定: 接続端末の機種名から {PRESETS_DIR}/<機種名>.json を自動で選ぶ）",
+    )
     g.add_argument("--preset", help="読み込むプリセット名（書籍名）。--region/--tap/--interval/--settle の未指定分を補う")
 
     g = p.add_argument_group("自動実行")
@@ -157,9 +160,21 @@ class CaptureParams:
     book: str
 
 
-def resolve_capture_params(args: argparse.Namespace, store: PresetStore) -> CaptureParams:
+def open_preset_store(args: argparse.Namespace, serial: str) -> PresetStore:
+    """--presets 指定があればそれを、なければ端末の機種名に対応するファイルを開く。"""
+    if args.presets:
+        return PresetStore(args.presets)
+    model = adb.device_model(serial)
+    store = PresetStore(device_presets_path(model))
+    log.info("プリセット: %s（機種 %s）", store.path, model)
+    return store
+
+
+def resolve_capture_params(args: argparse.Namespace, store: PresetStore | None) -> CaptureParams:
     preset = None
     if args.preset:
+        if store is None:
+            raise CaptureError("プリセットファイルが開かれていません")
         preset = store.get(args.preset)
         if preset is None:
             raise CaptureError(f"プリセットが見つかりません: {args.preset!r}（登録済み: {', '.join(store.names()) or 'なし'}）")
@@ -190,10 +205,11 @@ def resolve_capture_params(args: argparse.Namespace, store: PresetStore) -> Capt
 
 def run_headless(args: argparse.Namespace) -> int:
     """GUI なしで自動実行する。"""
-    store = PresetStore(args.presets)
+    serial = adb.resolve_serial(args.serial)
+    store = open_preset_store(args, serial)
     params = resolve_capture_params(args, store)
     out_dir = book_dir(Path(args.out), params.book, args.volume)
-    session = make_session(args)
+    session = make_session(args, serial=serial)
     session.start()
     try:
         if not session.wait_first_frame(timeout=15.0):

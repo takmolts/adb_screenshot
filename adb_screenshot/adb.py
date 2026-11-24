@@ -97,6 +97,14 @@ def connect(address: str) -> None:
         raise AdbError(f"adb connect に失敗しました: {out}")
 
 
+def device_model(serial: str) -> str:
+    """端末の機種名（`ro.product.model`）を返す。"""
+    model = run(adb_args(serial) + ["shell", "getprop", "ro.product.model"]).stdout.strip()
+    if not model:
+        raise AdbError(f"端末の機種名を取得できませんでした: {serial}")
+    return model
+
+
 _PHYSICAL_SIZE_RE = re.compile(r"Physical size:\s*(\d+)x(\d+)")
 _OVERRIDE_SIZE_RE = re.compile(r"Override size:\s*(\d+)x(\d+)")
 

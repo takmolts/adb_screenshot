@@ -1,15 +1,26 @@
-"""書籍ごとのキャプチャ設定（領域・タップ位置など）を JSON に保存するプリセット管理。"""
+"""書籍ごとのキャプチャ設定（領域・タップ位置など）を JSON に保存するプリセット管理。
+
+同じ書籍でも端末ごとに解像度が違うため、プリセットファイルは端末（機種名）ごとに分ける:
+`presets/<機種名>.json`（例: presets/LYA-L29.json）。
+"""
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-DEFAULT_PRESETS_PATH = Path(__file__).resolve().parent.parent / "presets.json"
+PRESETS_DIR = Path(__file__).resolve().parent.parent / "presets"
+
+
+def device_presets_path(model: str) -> Path:
+    """機種名に対応するプリセットファイルのパスを返す。"""
+    safe = re.sub(r"[^\w.-]", "_", model.strip()) or "unknown"
+    return PRESETS_DIR / f"{safe}.json"
 
 
 @dataclass
@@ -40,10 +51,10 @@ def _opt_float(value) -> float | None:
 
 
 class PresetStore:
-    """presets.json の読み書き。名前の登録順を保つ。"""
+    """プリセットファイルの読み書き。名前の登録順を保つ。"""
 
-    def __init__(self, path: Path | None = None) -> None:
-        self.path = Path(path) if path else DEFAULT_PRESETS_PATH
+    def __init__(self, path: Path | str) -> None:
+        self.path = Path(path)
         self._presets: dict[str, Preset] = {}
         self.load()
 
